@@ -1,4 +1,3 @@
-
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/time.h>
@@ -6,6 +5,7 @@
 #include <sys/wait.h>
 #include <sys/errno.h>
 #include <netinet/in.h>
+#include <arpa/inet.h>
 #include <netdb.h>
 
 #include <stdarg.h>
@@ -23,6 +23,8 @@ int		errexit(const char *format, ...);
 int		passivesock(const char *portnum, int qlen);
 int		handle(int fd, char *cname);
 
+//TODO - Gracefully exit when u get SIGINT or Control-C
+
 /*------------------------------------------------------------------------
  * main - TCP server for Chat Session service
  *------------------------------------------------------------------------
@@ -32,20 +34,23 @@ int main(int argc, char *argv[])
 	char	*portnum = "5050";	/* Standard server port number	*/
 	char	*ccport = "8888";	/* Chat Coordinator port number	*/
 	struct sockaddr_in fsin;	/* the from address of a client	*/
-	int	msock = -1;			/* master server socket		*/
+	int	msock = -1;			/* master server socket	*/
 	fd_set	rfds;			/* read file descriptor set	*/
-	fd_set	afds;			/* active file descriptor set	*/
-	unsigned int	alen;		/* from-address length		*/
+	fd_set	afds;			/* active file descriptor set */
+	unsigned int	alen;		/* from-address length */
 	int	fd, nfds;
 	
 	/* table to store adresses and ports of clients */
 	char client_name [MAX_CLIENT][25];
 	
-	/* table to store file descriptors corresponding to names */
+	/* table to store socket descriptors corresponding to names */
 	int fd_table [MAX_CLIENT];
 	
 	/* total clients connected so far */
 	int current_number = 0;
+	
+	/* chatroom name */
+	char chatname [30];
 	
 	switch (argc) {
 	case	1:
@@ -62,6 +67,12 @@ int main(int argc, char *argv[])
 	    msock = atoi(argv[2]);
 	    ccport = argv[3];
 	    break;
+    case    5:
+        portnum = argv[1];
+	    msock = atoi(argv[2]);
+	    ccport = argv[3];
+	    strcpy(chatname,argv[4]);
+	    break;
 	default:
 		errexit("Wrong Usage- %d arguments given\n", argc);
 	}
@@ -69,22 +80,72 @@ int main(int argc, char *argv[])
     if (msock == -1) {
         msock = passivesock(portnum, QLEN);
     }
-	
 
 	nfds = getdtablesize();
 	FD_ZERO(&afds);
 	FD_SET(msock, &afds);
-    struct timeval timeout;
+    struct timespec timeout;
     timeout.tv_sec = 60;
-	timeout.tv_usec = 0;
+	timeout.tv_nsec = 0;
 	while (1) {
 		memcpy(&rfds, &afds, sizeof(rfds));
-        int readsocks = select(nfds, &rfds, (fd_set *)0, (fd_set *)0, &timeout);
+        int readsocks = pselect(nfds, &rfds, (fd_set *)0, (fd_set *)0, &timeout,NULL);
 		if (readsocks < 0)
 			errexit("select: %s\n", strerror(errno));
 		else if(readsocks == 0) {
-		    /* Send Terminate to Chat Coordinator */
-		    //TODO
+		    int i;
+		    for(i=0;i<=current_number;i++) { 
+		        if (strcmp(client_name[i],"")!=0) {
+		            //sprintf("closing %d\n",fd_table[i]);
+		            close(fd_table[i]);
+		        }
+		    }
+		    close(msock);
+            //printf("closing %d\n",msock);
+            printf("Session Server for chatroom %s Dying\n",chatname);
+            
+            /* Struct to store address and port of server */
+            struct sockaddr_in server;
+    
+            /* Length contains size of sockaddr_in in bytes */ 
+            int len = sizeof(struct sockaddr_in);
+            
+            /* struct to store hostname */
+            struct hostent *host;
+            
+            /* fill hostent struct */
+            host = gethostbyname("localhost");
+            if (host == NULL) {
+	            errexit("Get host by name");
+            }
+            
+            int port, sd;
+            
+            /* convert portnum taken from command line as string to integer */  
+            port = atoi(ccport);
+            
+            /* initialize socket */
+            if ((sd=socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) == -1) {
+	            perror("socket");
+	            return 1;
+            }
+            
+            /* set all bytes in struct sockaddr_in to 0 */
+            memset((char *) &server, 0, sizeof(struct sockaddr_in));
+            
+            /* initialize server addr */
+            server.sin_family = AF_INET;
+            server.sin_port = htons(port);
+            server.sin_addr = *((struct in_addr*) host->h_addr);
+            
+            char message [50];
+            strcpy(message,"Terminate ");
+            strcat(message,chatname);
+            if (sendto(sd, message, strlen(message) , 0, (struct sockaddr *) &server, len) == -1) {
+                errexit("Send to chat coordinator failed while starting chat\n");
+            }
+            
+            return 1;
 		}
 		if (FD_ISSET(msock, &rfds)) {
 			int	ssock;
@@ -95,7 +156,8 @@ int main(int argc, char *argv[])
 			/* get clientname */
             char cname [25];
             char port [8];
-            strcpy(cname,(char *)inet_ntoa(fsin.sin_addr));
+            char *ip = inet_ntoa(fsin.sin_addr);
+            strcpy(cname,ip);
             strcat(cname,":");
             snprintf(port, sizeof(port), "%d", ntohs(fsin.sin_port));
             strcat(cname,port);
@@ -118,7 +180,7 @@ int main(int argc, char *argv[])
 			if (fd != msock && FD_ISSET(fd, &rfds)){
 			    int index =-1, i=0;
 			    for(i=0;i<=current_number;i++) {
-			        if (fd == fd_table[i]) {
+			        if ((fd == fd_table[i]) && (strcmp(client_name[i],"")!=0)) {
 			            index = i;
 			            break;
 			        }
@@ -129,6 +191,7 @@ int main(int argc, char *argv[])
 			    }
 				if (handle(fd,client_name[index]) == 0) {
 					(void) close(fd);
+					strcpy(client_name[index],"");
 					FD_CLR(fd, &afds);
 				}
 			}
@@ -173,7 +236,7 @@ int handle(int ssock, char *cname)
         if (buf[si] == ' ') si++;
          
         /* print the message received */
-        printf("%s - %s\n", cname, buf+si);
+        printf("Recieved: %s - %s\n", cname, buf+si);
         
         /* check if client is new */
         int index = -1;
@@ -233,7 +296,7 @@ int handle(int ssock, char *cname)
             bzero(buf, BUF_SIZE);
             /* Insert message length */
             char message_length [3];
-            snprintf(message_length, sizeof(message_length), "%d", strlen(message_table[previous_info[index]])+1);
+            snprintf(message_length, sizeof(message_length), "%d", (int)strlen(message_table[previous_info[index]])+1);
             strcpy(buf,message_length);
             strcat(buf," ");
             strcat(buf,message_table[previous_info[index]]);
@@ -272,14 +335,15 @@ int handle(int ssock, char *cname)
         if (n < 0) {
             error("ERROR writing to socket");
         }
-        
+        printf("sending- %s\n",buf);
+        //sleep(1);
         /* send all messages one by one now */
         for(i=0;i<tot;i++) {
-            sleep(1);
+            //sleep(1);
             bzero(buf, BUF_SIZE);
             /* Insert message length */
             char message_length [3];
-            snprintf(message_length, sizeof(message_length), "%d", strlen(message_table[previous_info[index]])+1);
+            snprintf(message_length, sizeof(message_length), "%d", (int)strlen(message_table[previous_info[index]])+1);
             strcpy(buf,message_length);
             strcat(buf," ");
             strcat(buf,message_table[previous_info[index]]);
@@ -295,7 +359,7 @@ int handle(int ssock, char *cname)
         return 0;
     }
     else {
-            printf("Incorrect Format/Unsupported Method\n");
+            //printf("Incorrect Format/Unsupported Method\n");
     }
     return 1;
 }
@@ -370,4 +434,3 @@ int passivesock(const char *portnum, int qlen)
             errexit("can't listen on %s port: %s\n", portnum, strerror(errno));
         return s;
 }
-

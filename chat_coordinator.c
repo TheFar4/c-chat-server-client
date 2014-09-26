@@ -13,6 +13,8 @@
 #define BUF_SIZE 1024 /* max buffer length */
 #define TOT_SERV 100 /* max number of chat sessions */
 
+//TODO - Gracefully exit when u get SIGINT or Control-C
+
 extern int	errno;
 int		errexit(const char *format, ...);
 int		passivesock(const char *portnum, int qlen);
@@ -44,7 +46,7 @@ int main(int argc, char* argv[]) {
     int len = sizeof(struct sockaddr_in);
     
     /* integers to store bytes received, socket descriptor and server's port number */
-    int n, s, port;
+    int n, s, port, i;
     
     /* Usage ./session_server 8888 */
     if (argc < 2) {
@@ -56,7 +58,7 @@ int main(int argc, char* argv[]) {
 	    perror("socket");
 	    return 1;
     }
-
+    
     /* get port from string */
     port = atoi(argv[1]);
     
@@ -78,7 +80,6 @@ int main(int argc, char* argv[]) {
     bzero(buf,BUF_SIZE);
     /* receive data message of size n. Loop while n is positive */
     while ((n = recvfrom(s, buf, BUF_SIZE, 0, (struct sockaddr *) &other, &len)) != -1) {
-        printf("%s\n",buf);
 	    /* Look at message content and take appropriate action */  
         if (strncmp(buf,"Start",5)==0) {
             /* call ss_start to Start Chat Session */
@@ -89,7 +90,16 @@ int main(int argc, char* argv[]) {
             ss_find(buf,s,n,(struct sockaddr *) &other,len);
         }
         else if (strncmp(buf,"Terminate",9)==0) {
-            /* TODO - Add support for TERMINATE */
+            /* support for TERMINATE */
+            printf("Chat Coordinator : Got Terminate <%s>\n",buf+10);
+            char sname [25];
+            strcpy(sname,buf+10);
+            for(i=0;i<cur_serv;i++) {
+                if (strcmp(sname,ss_names[i])== 0) {
+                    break;
+                }
+            }
+            strcpy(ss_names[i],"");
         }
         else {
             printf("Incorrect Format/Unsupported Method");
@@ -116,9 +126,6 @@ void  ss_start (char *buf, int s, int n, struct sockaddr *refer_other,int len,in
         }
     }
     if ((i==cur_serv) && (cur_serv < TOT_SERV)){
-        
-        
-        
         char servport [8];
         bzero(servport,sizeof(servport));
         snprintf(servport, sizeof(servport), "%d", serv_port);
@@ -146,7 +153,7 @@ void  ss_start (char *buf, int s, int n, struct sockaddr *refer_other,int len,in
         }
         else if (pid == 0) {
             // When fork() returns 0, we are in the child process.
-            execl("session_server","session_server",port,sd,servport,NULL);
+            execl("session_server","session_server",port,sd,servport,sname,NULL);
             exit(1);
         }
         else {
@@ -173,7 +180,6 @@ void  ss_start (char *buf, int s, int n, struct sockaddr *refer_other,int len,in
  *-----------------------------------------------------------------------------------
  */
 void  ss_find (char *buf, int s, int n, struct sockaddr *refer_other,int len) {
-    printf("we are inside ssjoin\n");
     char sname [25];
     bzero(sname,sizeof(sname));
     strncpy(sname, buf+5, n-5);

@@ -10,7 +10,7 @@
 #include <unistd.h>
 #include <sys/errno.h>
 
-#define BUF_SIZE 1024
+#define BUF_SIZE 2048
 
 extern int	errno;
 
@@ -19,6 +19,9 @@ void talk_to_ss(char*, char*);
 int cc_start (int, int, int, char*, struct sockaddr *, struct sockaddr_in server);
 int cc_join (int, int, int, char*, struct sockaddr *, struct sockaddr_in server);
 int	connectsock(const char*, const char*);
+int printMessages(int n, int total, int sd,char* buf);
+
+//TODO - Gracefully exit when u get SIGINT or Control-C
 
 /*------------------------------------------------------------------------
  * main - Client for chat service
@@ -64,6 +67,7 @@ int main(int argc, char *argv[]) {
 
     /* set all bytes in struct sockaddr_in to 0 */
     memset((char *) &server, 0, sizeof(struct sockaddr_in));
+    
     /* initialize server addr */
     server.sin_family = AF_INET;
     server.sin_port = htons(port);
@@ -134,8 +138,7 @@ int cc_start (int s, int n, int len, char* buf, struct sockaddr *srv_ptr, struct
     strcat(message,sname);
     /* send message */
     if (sendto(s, message, strlen(message) , 0, srv_ptr, len) == -1) {
-        perror("sendto()");
-        exit(0);
+        errexit("Send to chat coordinator failed while starting chat");
     }
     /* receive a reply */
     n = recvfrom(s, buf, BUF_SIZE, 0, srv_ptr, &len);
@@ -170,7 +173,7 @@ int cc_join (int s, int n, int len, char* buf, struct sockaddr *srv_ptr, struct 
     
     /* send message */
     if (sendto(s, message, strlen(message) , 0, srv_ptr, len) == -1) {
-        errexit("Send failed while Joining chat");
+        errexit("Send to chat coordinator failed while Joining chat");
     }
     
     /* receive a reply */
@@ -235,7 +238,7 @@ void talk_to_ss(char* host, char* portno) {
                     
                     /* Insert message length */
                     char message_length [3];
-                    snprintf(message_length, sizeof(message_length), "%d", strlen(message)+2);
+                    snprintf(message_length, sizeof(message_length), "%d", (int)strlen(message)+1);
                     
                     if (strlen(message_length)==1) {
                         buf[7] = *message_length;
@@ -253,8 +256,10 @@ void talk_to_ss(char* host, char* portno) {
                     /* send message to server */
                     n = write(s, buf, strlen(buf)+1);
                     if (n < 0) {
-                        error("ERROR writing to socket");
+                        printf("Lost connection to session server - %s\n",strerror(errno));
+                        choice = 9;
                     }
+                    //printf("n = %d\n",n);
                     break;
                 }
             case 2:
@@ -266,12 +271,14 @@ void talk_to_ss(char* host, char* portno) {
                     /* send message to server */
                     n = write(s, buf, strlen(buf)+1);
                     if (n < 0) {
-                        error("ERROR writing to socket");
+                        printf("Lost connection to session server - %s\n",strerror(errno));
+                        choice = 9;
                     }
                     
                     n = read(s, buf, BUF_SIZE);
                     if (n < 0) {
-                        errexit("ERROR reading from socket");
+                        printf("Lost connection to session server - %s\n",strerror(errno));
+                        choice = 9;
                     }
                     if (strncmp(buf,"-1",2)==0) {
                         //-1 stands for error
@@ -300,33 +307,25 @@ void talk_to_ss(char* host, char* portno) {
                     /* send message to server */
                     n = write(s, buf, strlen(buf)+1);
                     if (n < 0) {
-                        error("ERROR writing to socket");
+                        printf("Lost connection to session server - %s\n",strerror(errno));
+                        choice = 9;
                     }
                     /* No of messages */
                     n = read(s, buf, BUF_SIZE);
                     if (n < 0) {
-                        errexit("ERROR reading from socket");
+                        printf("Lost connection to session server - %s\n",strerror(errno));
+                        choice = 9;
                     }
+                    //printf("n=%d\n",n);
                     int tot = atoi(buf);
                     printf("Total %d new messages\n",tot);
-                    int i;
-                    for (i=0;i<tot;i++) {
-                        bzero(buf, BUF_SIZE);
-                        /* Read each message */
-                        n = read(s, buf, BUF_SIZE);
-                        if (n < 0) {
-                            errexit("ERROR reading from socket");
-                        }
-                        if (buf[1] == ' ') {
-                            printf("%s\n",buf+2);
-                        }
-                        else if (buf[2] == ' '){
-                            printf("%s\n",buf+3);
-                        }
-                        else if (buf[3] == ' '){
-                            printf("%s\n",buf+4);
-                        }
+                    
+                    // print tot messages
+                    if(printMessages(n-strlen(buf)-1,tot,s,buf)<0){
+                        printf("Lost connection to session server - %s\n",strerror(errno));
+                        choice = 9;
                     }
+                    
                     break;
                 }
             case 4:
@@ -338,9 +337,9 @@ void talk_to_ss(char* host, char* portno) {
                     /* send message to server */
                     n = write(s, buf, strlen(buf)+1);
                     if (n < 0) {
-                        error("ERROR writing to socket");
+                        printf("Lost connection to session server - %s\n",strerror(errno));
                     }
-                    
+                    close(s);
                     choice = 9;
                     break;
                 }
@@ -350,7 +349,6 @@ void talk_to_ss(char* host, char* portno) {
                 }
         } 
     }
-    close(s);
 }
 
 /*------------------------------------------------------------------------
@@ -414,4 +412,39 @@ int errexit(const char *format, ...)
         vfprintf(stderr, format, args);
         va_end(args);
         exit(1);
+}
+
+/*------------------------------------------------------------------------
+ * printMessages - function that prints "total" messages. There may be 
+ * multiple messages in a sungle read
+ *------------------------------------------------------------------------
+ */
+int printMessages(int n, int total, int sd, char* buf) {
+    int i=0;
+    char *start =  buf;
+    start += strlen(buf)+1;
+    while(i<total){
+        if(n==0) {
+            bzero(buf,BUF_SIZE);
+            n = read(sd, buf, BUF_SIZE);
+            if (n < 0) {
+                printf("Lost connection to session server - %s\n",strerror(errno));
+                return -1;
+            }
+            start = buf;
+        }
+        if (start[1] == ' ') {
+            printf("%s\n",start+2);
+        }
+        else if (start[2] == ' '){
+            printf("%s\n",start+3);
+        }
+        else if (start[3] == ' '){
+            printf("%s\n",start+4);
+        }
+        n = n - strlen(start) - 1;
+        start = start + strlen(start) + 1;
+        i++;
+    }
+    return 1;
 }
